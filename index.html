@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover" />
+<title>Mobile FPS Gun View</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#000;touch-action:none;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif}
+  canvas{display:block;width:100vw;height:100vh;background:#77a3d6;image-rendering:auto}
+  #hint{position:fixed;left:10px;top:10px;color:rgba(255,255,255,.72);font-size:12px;text-shadow:0 1px 3px #000;pointer-events:none;user-select:none}
+  #touch{position:fixed;inset:0;pointer-events:none}
+  .pad{position:absolute;bottom:24px;width:118px;height:118px;border:1px solid rgba(255,255,255,.16);border-radius:50%;background:rgba(0,0,0,.08);pointer-events:auto;touch-action:none}
+  #movePad{left:22px} #lookPad{right:22px}
+  .nub{position:absolute;left:44px;top:44px;width:30px;height:30px;border-radius:50%;background:rgba(255,255,255,.23);box-shadow:0 0 18px rgba(255,255,255,.08)}
+  @media (pointer:fine){#touch{display:none} #hint{font-size:13px}}
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="hint">Touch pads / WASD + mouse. Gamepad supported.</div>
+<div id="touch">
+  <div id="movePad" class="pad"><div class="nub"></div></div>
+  <div id="lookPad" class="pad"><div class="nub"></div></div>
+</div>
+<script>
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const DPR = Math.min(devicePixelRatio || 1, 2);
+  let W=0,H=0,cx=0,cy=0,scale=1;
+  function resize(){ W=innerWidth; H=innerHeight; canvas.width=W*DPR; canvas.height=H*DPR; canvas.style.width=W+'px'; canvas.style.height=H+'px'; ctx.setTransform(DPR,0,0,DPR,0,0); cx=W/2; cy=H/2; scale=Math.min(W/800,H/600); }
+  addEventListener('resize', resize, {passive:true}); resize();
+
+  const player = {x:0,y:1.62,z:-5.4,yaw:0,pitch:0};
+  const keys = Object.create(null);
+  let last = performance.now(), bob=0;
+  const moveInput = {x:0,y:0}, lookInput = {x:0,y:0};
+  addEventListener('keydown', e=> keys[e.key.toLowerCase()] = true);
+  addEventListener('keyup', e=> keys[e.key.toLowerCase()] = false);
+  canvas.addEventListener('click',()=>canvas.requestPointerLock?.());
+  addEventListener('mousemove',e=>{ if(document.pointerLockElement===canvas){ player.yaw -= e.movementX*0.0022; player.pitch -= e.movementY*0.0016; clampPitch(); }});
+  function clampPitch(){ player.pitch = Math.max(-0.55, Math.min(0.45, player.pitch)); }
+
+  function bindPad(id,out){
+    const pad = document.getElementById(id), nub = pad.querySelector('.nub');
+    let active=false, pid=-1, rect=null;
+    function set(x,y){
+      const r=49, dx=x-59, dy=y-59, len=Math.hypot(dx,dy), m=len>r?r/len:1;
+      out.x=dx*m/r; out.y=dy*m/r; nub.style.transform=`translate(${dx*m}px,${dy*m}px)`;
+    }
+    pad.addEventListener('pointerdown',e=>{active=true;pid=e.pointerId;rect=pad.getBoundingClientRect();pad.setPointerCapture(pid);set(e.clientX-rect.left,e.clientY-rect.top);});
+    pad.addEventListener('pointermove',e=>{if(active&&e.pointerId===pid)set(e.clientX-rect.left,e.clientY-rect.top);});
+    function end(e){if(e.pointerId!==pid)return;active=false;pid=-1;out.x=out.y=0;nub.style.transform='translate(0,0)';}
+    pad.addEventListener('pointerup',end); pad.addEventListener('pointercancel',end);
+  }
+  bindPad('movePad',moveInput); bindPad('lookPad',lookInput);
+
+  const cube = {x:0,y:1.1,z:3.2,s:2.2};
+  const fov = 520;
+  const horizonBase = () => H*0.47 + player.pitch*260;
+  function camPoint(p){
+    const dx=p.x-player.x, dy=p.y-player.y, dz=p.z-player.z;
+    const s=Math.sin(player.yaw), c=Math.cos(player.yaw);
+    return {x:dx*c-dz*s, y:dy, z:dx*s+dz*c};
+  }
+  function project(p){
+    const q = camPoint(p); if(q.z<=0.08) return null;
+    return {x:cx + q.x/q.z*fov*scale, y:horizonBase() - q.y/q.z*fov*scale, z:q.z};
+  }
+  function poly(points, fill, stroke){
+    const pp = points.map(project); if(pp.some(p=>!p)) return;
+    ctx.beginPath(); ctx.moveTo(pp[0].x,pp[0].y); for(let i=1;i<pp.length;i++) ctx.lineTo(pp[i].x,pp[i].y); ctx.closePath();
+    ctx.fillStyle=fill; ctx.fill(); if(stroke){ctx.strokeStyle=stroke;ctx.lineWidth=1;ctx.stroke();}
+  }
+
+  function sky(){
+    const h=horizonBase();
+    const g=ctx.createLinearGradient(0,0,0,Math.max(h,1));
+    g.addColorStop(0,'#6f8eb9'); g.addColorStop(.55,'#a9d0ee'); g.addColorStop(1,'#effff2');
+    ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
+    ctx.fillStyle='#a9afa2'; ctx.fillRect(0,h,W,H-h);
+    // subtle terrain rings like old Unity fog/grid, cheap but effective goblinry
+    ctx.strokeStyle='rgba(123,132,115,.20)'; ctx.lineWidth=1;
+    for(let i=0;i<9;i++){
+      ctx.beginPath();
+      const y=h+45+i*i*9*scale;
+      ctx.ellipse(cx,y,W*(.36+i*.12),42+i*16,0,Math.PI,Math.PI*2);
+      ctx.stroke();
+    }
+  }
+  function drawWorld(){
+    const h=horizonBase();
+    // cube shadow
+    poly([{x:-.05,y:.02,z:2.15},{x:2.45,y:.02,z:2.55},{x:3.3,y:.02,z:4.2},{x:.2,y:.02,z:4.45}], 'rgba(0,0,0,.92)');
+    const s=cube.s/2, x=cube.x, z=cube.z, y=0;
+    const A={x:x-s,y:y,z:z-s},B={x:x+s,y:y,z:z-s},C={x:x+s,y:y,z:z+s},D={x:x-s,y:y,z:z+s};
+    const E={x:x-s,y:y+cube.s,z:z-s},F={x:x+s,y:y+cube.s,z:z-s},G={x:x+s,y:y+cube.s,z:z+s},I={x:x-s,y:y+cube.s,z:z+s};
+    poly([A,E,I,D], '#494d45');
+    poly([B,C,G,F], '#050505');
+    poly([A,B,F,E], '#020202');
+    poly([E,F,G,I], '#030303');
+  }
+  function crosshair(){
+    const x=cx, y=cy-3*scale, r=13*scale, gap=7*scale;
+    ctx.save(); ctx.strokeStyle='rgba(255,38,38,.82)'; ctx.lineWidth=Math.max(1,1.2*scale);
+    ctx.beginPath(); ctx.moveTo(x-r,y-r); ctx.lineTo(x-gap,y-gap); ctx.moveTo(x+r,y-r); ctx.lineTo(x+gap,y-gap); ctx.moveTo(x-r,y+r); ctx.lineTo(x-gap,y+gap); ctx.moveTo(x+r,y+r); ctx.lineTo(x+gap,y+gap); ctx.stroke(); ctx.restore();
+  }
+  function gunPath(points, fill, stroke='#070707', lw=1){
+    ctx.beginPath(); ctx.moveTo(points[0][0],points[0][1]); for(let i=1;i<points.length;i++)ctx.lineTo(points[i][0],points[i][1]); ctx.closePath(); ctx.fillStyle=fill; ctx.fill(); if(stroke){ctx.strokeStyle=stroke;ctx.lineWidth=lw;ctx.stroke();}
+  }
+  function hand(cx,cy,rx,ry,rot){
+    ctx.save(); ctx.translate(cx,cy); ctx.rotate(rot);
+    const g=ctx.createRadialGradient(-rx*.2,-ry*.3,2,0,0,Math.max(rx,ry));
+    g.addColorStop(0,'#d2ad96'); g.addColorStop(.48,'#a87c67'); g.addColorStop(1,'#5a4037');
+    ctx.fillStyle=g; ctx.beginPath(); ctx.ellipse(0,0,rx,ry,0,0,Math.PI*2); ctx.fill();
+    ctx.strokeStyle='rgba(36,22,18,.42)'; ctx.lineWidth=2*scale; ctx.stroke(); ctx.restore();
+  }
+  function drawGun(){
+    const b = Math.sin(bob)*3*scale, x0=W*.67, y0=H*.67+b, k=Math.min(W/800,H/600)*1.02;
+    ctx.save(); ctx.translate(x0,y0); ctx.scale(k,k);
+    ctx.shadowColor='rgba(0,0,0,.45)'; ctx.shadowBlur=10; ctx.shadowOffsetY=7;
+    // hands first, peeking from bottom-right like the reference
+    hand(135,160,34,58,-.36); hand(34,184,31,67,-.5); hand(96,208,43,38,-.15);
+    ctx.shadowBlur=0;
+    // slide/body silhouette
+    gunPath([[6,52],[48,28],[170,50],[214,74],[213,116],[180,124],[82,102],[18,91]], '#080909');
+    gunPath([[22,45],[62,23],[165,44],[198,63],[160,70],[58,53]], '#1a1c1c');
+    gunPath([[58,55],[160,72],[190,88],[172,103],[68,86],[15,77]], '#111313');
+    // muzzle block
+    gunPath([[177,58],[220,75],[218,117],[180,124],[186,89]], '#090a0a');
+    gunPath([[195,76],[224,87],[212,98],[194,90]], '#151717');
+    ctx.fillStyle='#020202'; ctx.beginPath(); ctx.arc(207,91,13,0,Math.PI*2); ctx.fill();
+    ctx.strokeStyle='#222'; ctx.lineWidth=3; ctx.beginPath(); ctx.arc(207,91,9,0,Math.PI*2); ctx.stroke();
+    // sights
+    gunPath([[45,23],[56,20],[58,31],[45,32]], '#151515');
+    gunPath([[151,43],[166,44],[169,57],[151,55]], '#191919');
+    gunPath([[72,30],[105,34],[95,43],[61,39]], '#2c2f2d');
+    // grip and trigger guard
+    gunPath([[78,91],[123,101],[111,182],[69,174],[55,105]], '#070808');
+    gunPath([[66,106],[92,112],[86,142],[58,132]], '#101111');
+    gunPath([[111,109],[137,116],[129,139],[105,134]], '#080909');
+    ctx.strokeStyle='#242626'; ctx.lineWidth=2; for(let i=0;i<9;i++){ctx.beginPath();ctx.moveTo(33+i*11,59+i*.7);ctx.lineTo(27+i*11,75+i*.8);ctx.stroke();}
+    // red safety detail
+    ctx.fillStyle='#701515'; ctx.fillRect(119,110,8,6);
+    // highlights
+    ctx.strokeStyle='rgba(255,255,255,.10)'; ctx.lineWidth=2; ctx.beginPath(); ctx.moveTo(32,45); ctx.lineTo(160,55); ctx.stroke();
+    ctx.strokeStyle='rgba(255,255,255,.06)'; ctx.beginPath(); ctx.moveTo(60,80); ctx.lineTo(171,102); ctx.stroke();
+    ctx.restore();
+  }
+  function update(dt){
+    const gp = navigator.getGamepads?.()[0];
+    let mx=moveInput.x, my=moveInput.y, lx=lookInput.x, ly=lookInput.y;
+    if(gp){ mx += gp.axes[0]||0; my += gp.axes[1]||0; lx += gp.axes[2]||0; ly += gp.axes[3]||0; }
+    if(keys.w||keys.arrowup) my -= 1; if(keys.s||keys.arrowdown) my += 1; if(keys.a||keys.arrowleft) mx -= 1; if(keys.d||keys.arrowright) mx += 1;
+    const len=Math.hypot(mx,my); if(len>1){mx/=len;my/=len;}
+    const sp=dt*3.2, s=Math.sin(player.yaw), c=Math.cos(player.yaw);
+    player.x += (mx*c - my*s)*sp; player.z += (mx*s + my*c)*sp;
+    player.yaw -= lx*dt*2.2; player.pitch -= ly*dt*1.2; clampPitch();
+    bob += (Math.abs(mx)+Math.abs(my))*dt*9 + dt*.8;
+  }
+  function frame(now){
+    const dt=Math.min(.033,(now-last)/1000); last=now; update(dt); sky(); drawWorld(); crosshair(); drawGun(); requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
